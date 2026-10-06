@@ -76,3 +76,5 @@ create policy "Configured admin can delete portfolio photos"
     bucket_id = 'portfolio-images'
     and lower(auth.jwt() ->> 'email') = lower('REPLACE_WITH_ADMIN_EMAIL')
   );
+
+notify pgrst, 'reload schema';

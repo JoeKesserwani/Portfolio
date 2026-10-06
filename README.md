@@ -18,7 +18,7 @@ The portfolio data in Supabase is the shared source of truth. The public site lo
 ## Shared portfolio setup
 
 1. Create a Supabase project.
-2. In the Supabase SQL Editor, open [`supabase/setup.sql`](./supabase/setup.sql), replace every `REPLACE_WITH_ADMIN_EMAIL` with the email address you will use to administer the site, then run the script. It creates the shared portfolio table, row-level security policies, and a public-read photo bucket with admin-only upload and delete policies.
+2. In your hosted project's **Supabase Dashboard → SQL Editor** (not the local Supabase extension connection), run [`supabase/setup.sql`](./supabase/setup.sql) after replacing every `REPLACE_WITH_ADMIN_EMAIL` with your admin account email. If you're setting up this repository with the configured admin account, use the local, Git-ignored `supabase/setup.local.sql` instead. The script creates the shared portfolio table, row-level security policies, a public-read photo bucket with admin-only upload/delete policies, and refreshes the REST schema cache.
 3. In **Authentication → Providers**, enable Email/password authentication and disable new user sign-ups. Create or invite your own admin user from the Supabase dashboard, using the same email entered in the SQL script. Do not make the site public signup-enabled.
 4. Copy your Supabase project URL and its publishable/anon key from the project API settings. Never put the service-role key in this frontend.
 5. For local development, create an untracked `.env.local` file in the repository root with:
@@ -34,6 +34,8 @@ The portfolio data in Supabase is the shared source of truth. The public site lo
 8. Sign in at `https://joekesserwani.github.io/Portfolio/?admin`. If the shared portfolio is empty, choose **Import saved work** to transfer content/photos from the current browser after confirmation, or initialize it with the starter content. Import only works from the browser that contains the old IndexedDB data.
 
 The Supabase anon/publishable key is intended to be visible in a static frontend. Row-level security and Storage policies enforce that only the configured admin email can change portfolio content or upload/delete photos.
+
+If the site reports that `public.portfolio_content` is missing from the schema cache, the setup SQL has not successfully run on the hosted project yet. Run the full setup script in that project's SQL Editor; it sends a PostgREST schema reload notification at the end. Then refresh the portfolio page.
 
 ## Deploying to GitHub Pages
 
