@@ -175,13 +175,24 @@ function ProjectCard({ project, index, onOpen }: { project: Project; index: numb
 }
 
 function ProjectModal({ project, onClose }: { project: Project; onClose: () => void }) {
+  const [selectedImage, setSelectedImage] = useState<ProjectImage | null>(null);
   useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (selectedImage) setSelectedImage(null);
+      else onClose();
+    };
     window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose, selectedImage]);
+  useEffect(() => {
     document.body.style.overflow = "hidden";
-    return () => { window.removeEventListener("keydown", closeOnEscape); document.body.style.overflow = ""; };
-  }, [onClose]);
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="project-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button className="modal-close" onClick={onClose} aria-label="Close project"><Icon name="close" /></button><div className="modal-topline"><span>{project.category}</span><span>{project.year}</span></div><h2 id="modal-title">{project.title}</h2><p className="modal-description">{project.description}</p><div className="modal-tags">{project.stack.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="modal-gallery">{project.images.map((image) => <img key={image.id} src={imageUrl(image)} alt={image.alt || project.title} />)}</div><div className="modal-links">{project.liveUrl && <a className="button button-dark" href={project.liveUrl} target="_blank" rel="noreferrer">View live project <Icon name="external" size={16} /></a>}{project.sourceUrl && <a className="button button-light" href={project.sourceUrl} target="_blank" rel="noreferrer"><Icon name="github" size={16} />View source</a>}</div></section></div>;
+    return () => { document.body.style.overflow = ""; };
+  }, []);
+  return <>
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="project-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button className="modal-close" onClick={onClose} aria-label="Close project"><Icon name="close" /></button><div className="modal-topline"><span>{project.category}</span><span>{project.year}</span></div><h2 id="modal-title">{project.title}</h2><p className="modal-description">{project.description}</p><div className="modal-tags">{project.stack.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="modal-gallery">{project.images.map((image) => <button className="modal-gallery-image" key={image.id} type="button" onClick={() => setSelectedImage(image)} aria-label={`View full image: ${image.alt || project.title}`}><img src={imageUrl(image)} alt={image.alt || project.title} /></button>)}</div><div className="modal-links">{project.liveUrl && <a className="button button-dark" href={project.liveUrl} target="_blank" rel="noreferrer">View live project <Icon name="external" size={16} /></a>}{project.sourceUrl && <a className="button button-light" href={project.sourceUrl} target="_blank" rel="noreferrer"><Icon name="github" size={16} />View source</a>}</div></section></div>
+    {selectedImage && <div className="image-viewer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedImage(null); }}><section className="image-viewer" role="dialog" aria-modal="true" aria-label={`Full image: ${selectedImage.alt || project.title}`}><button className="image-viewer-close" type="button" onClick={() => setSelectedImage(null)} aria-label="Close full image"><Icon name="close" /></button><img src={imageUrl(selectedImage)} alt={selectedImage.alt || project.title} /></section></div>}
+  </>;
 }
 
 function Admin({ data, updatePortfolio, theme, onToggleTheme, onLogout }: { data: PortfolioData; updatePortfolio: (data: PortfolioData) => Promise<void>; theme: "light" | "dark"; onToggleTheme: () => void; onLogout: () => void }) {

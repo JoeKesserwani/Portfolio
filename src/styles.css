@@ -115,7 +115,14 @@ button { color: inherit; }
 .project-modal h2 { margin: 22px 0 9px; font: 500 clamp(26px,4vw,37px)/1.16 "Space Grotesk",sans-serif; letter-spacing: -1.2px; }
 .modal-description { max-width: 590px; color: var(--muted); font-size: 12px; line-height: 1.8; }
 .modal-gallery { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin-top: 22px; }
-.modal-gallery img { display: block; width: 100%; height: 220px; object-fit: cover; background: var(--surface-subtle); }
+.modal-gallery-image { display: block; width: 100%; padding: 0; overflow: hidden; border: 0; background: var(--surface-subtle); cursor: zoom-in; }
+.modal-gallery-image img { display: block; width: 100%; height: 220px; object-fit: cover; }
+.modal-gallery-image:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.image-viewer-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 56px 24px 24px; background: #070a08f2; }
+.image-viewer { position: relative; display: grid; width: 100%; height: 100%; place-items: center; }
+.image-viewer > img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+.image-viewer-close { position: absolute; z-index: 1; top: -40px; right: 0; display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid #ffffff70; border-radius: 3px; background: #111713; color: #f4f7f2; cursor: pointer; }
+.image-viewer-close:focus-visible { outline: 2px solid #b8f28a; outline-offset: 2px; }
 .modal-links { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 22px; }
 
 /* Shared buttons and app states */
@@ -290,7 +297,8 @@ button { color: inherit; }
   .footer-links svg { width: 15px; }
   .project-modal { padding: 34px 18px 22px; }
   .modal-gallery { grid-template-columns: 1fr; }
-  .modal-gallery img { height: auto; min-height: 180px; max-height: 380px; }
+  .modal-gallery-image img { height: auto; min-height: 180px; max-height: 380px; }
+  .image-viewer-backdrop { padding: 56px 12px 12px; }
   .admin-sidebar { width: 49px; padding-right: 4px; padding-left: 4px; }
   .admin-brand-mark { width: 31px; height: 31px; font-size: 10px; }
   .admin-main { margin-left: 49px; }
