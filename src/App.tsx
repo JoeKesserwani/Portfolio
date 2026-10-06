@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
-import { emptyProject, loadPortfolio, savePortfolio } from "./storage";
+import { emptyProject, initializePortfolio as initializeSharedPortfolio, loadLegacyPortfolio, loadPortfolio, savePortfolio } from "./storage";
+import { getSupabaseClient, isAdminEmail, isSupabaseConfigured } from "./supabase";
 import type { PortfolioData, Profile, Project, ProjectImage } from "./types";
 
 type IconName = "arrow" | "external" | "github" | "linkedin" | "mail" | "plus" | "close" | "upload" | "spark" | "pin" | "check" | "trash" | "edit" | "back" | "sun" | "moon";
@@ -41,17 +42,44 @@ const blobUrls = new WeakMap<Blob, string>();
 function usePortfolio() {
   const [data, setData] = useState<PortfolioData | null>(null);
   const [loadError, setLoadError] = useState("");
+  const [initialized, setInitialized] = useState(false);
+  const [legacyData, setLegacyData] = useState<PortfolioData | null>(null);
+  const [legacyLoading, setLegacyLoading] = useState(true);
+  const [legacyError, setLegacyError] = useState("");
   useEffect(() => {
-    loadPortfolio().then(setData).catch((error: unknown) => {
-      setLoadError(error instanceof Error ? error.message : "Portfolio data could not be loaded.");
+    let active = true;
+    loadPortfolio().then((snapshot) => {
+      if (!active) return;
+      setData(snapshot.data);
+      setInitialized(snapshot.initialized);
+      if (snapshot.initialized) {
+        setLegacyLoading(false);
+        return;
+      }
+      loadLegacyPortfolio().then((legacy) => {
+        if (active) setLegacyData(legacy);
+      }).catch((error: unknown) => {
+        if (active) setLegacyError(error instanceof Error ? error.message : "Saved browser data could not be checked.");
+      }).finally(() => {
+        if (active) setLegacyLoading(false);
+      });
+    }).catch((error: unknown) => {
+      if (active) setLoadError(error instanceof Error ? error.message : "Portfolio data could not be loaded.");
     });
+    return () => { active = false; };
   }, []);
 
   async function updatePortfolio(next: PortfolioData) {
-    await savePortfolio(next);
-    setData(next);
+    const saved = await savePortfolio(next);
+    setData(saved);
+    setInitialized(true);
   }
-  return { data, setData, updatePortfolio, loadError };
+  async function initializeSharedData(next: PortfolioData) {
+    const saved = await initializeSharedPortfolio(next);
+    setData(saved);
+    setInitialized(true);
+  }
+  return { data, updatePortfolio, initializeSharedData, initialized, legacyData, legacyLoading, legacyError, loadError };
 }
 
 function App() {
@@ -60,12 +88,58 @@ function App() {
     window.location.pathname.replace(/\/+$/, "").endsWith("/admin") ||
     new URLSearchParams(window.location.search).has("admin");
   const homeUrl = import.meta.env.BASE_URL;
+  const [authLoading, setAuthLoading] = useState(true);
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const savedTheme = localStorage.getItem("folio-theme");
     if (savedTheme === "light" || savedTheme === "dark") return savedTheme;
     return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   });
-  const [isAuthenticated, setIsAuthenticated] = useState(() => sessionStorage.getItem("folio-admin-authenticated") === "true");
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [authError, setAuthError] = useState("");
+  useEffect(() => {
+    if (!isSupabaseConfigured()) {
+      setAuthLoading(false);
+      return;
+    }
+    let client: ReturnType<typeof getSupabaseClient>;
+    try {
+      client = getSupabaseClient();
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "Supabase authentication could not be initialized.");
+      setAuthLoading(false);
+      return;
+    }
+    let active = true;
+    const { data: { subscription } } = client.auth.onAuthStateChange((_event, session) => {
+      if (!active) return;
+      const isAuthorized = isAdminEmail(session?.user.email);
+      setIsAuthenticated(isAuthorized);
+      setAuthError(session && !isAuthorized ? "This account is not authorized to edit this portfolio." : "");
+      setAuthLoading(false);
+    });
+    client.auth.getSession().then(({ data, error }) => {
+      if (!active) return;
+      if (error) {
+        setAuthError(`Could not check your sign-in: ${error.message}`);
+        setAuthLoading(false);
+        return;
+      }
+      const session = data.session;
+      const isAuthorized = isAdminEmail(session?.user.email);
+      setIsAuthenticated(isAuthorized);
+      setAuthError(session && !isAuthorized ? "This account is not authorized to edit this portfolio." : "");
+      setAuthLoading(false);
+    }).catch((error: unknown) => {
+      if (active) {
+        setAuthError(error instanceof Error ? error.message : "Could not check your sign-in.");
+        setAuthLoading(false);
+      }
+    });
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
@@ -85,18 +159,25 @@ function App() {
     setTheme(nextTheme);
   };
   if (portfolio.loadError) {
-    return <main className="load-error"><Icon name="spark" size={26} /><h1>We couldn't open your portfolio.</h1><p>{portfolio.loadError}</p><p>Check your browser's local storage settings and refresh the page.</p></main>;
+    return <main className="load-error"><Icon name="spark" size={26} /><h1>We couldn't open your portfolio.</h1><p>{portfolio.loadError}</p><p>Check your Supabase connection and setup, then refresh the page.</p></main>;
   }
   if (!portfolio.data) return <div className="loading-screen"><span className="loading-mark">a.</span><span>Making room for good work…</span></div>;
+  if (isAdmin && authLoading) return <div className="loading-screen"><span className="loading-mark">a.</span><span>Checking admin session…</span></div>;
   if (isAdmin && !isAuthenticated) {
-    return <AdminLogin theme={theme} onToggleTheme={toggleTheme} onAuthenticated={() => {
-      sessionStorage.setItem("folio-admin-authenticated", "true");
-      setIsAuthenticated(true);
+    return <AdminLogin theme={theme} onToggleTheme={toggleTheme} authMessage={authError} onLogin={async (email, password) => {
+      const { data, error } = await getSupabaseClient().auth.signInWithPassword({ email, password });
+      if (error) throw new Error(error.message);
+      if (!isAdminEmail(data.user.email ?? undefined)) {
+        const { error: signOutError } = await getSupabaseClient().auth.signOut();
+        if (signOutError) throw new Error(`This account is not authorized, and its session could not be ended: ${signOutError.message}`);
+        throw new Error("This account is not authorized to edit this portfolio.");
+      }
     }} />;
   }
   return isAdmin
-    ? <Admin data={portfolio.data} updatePortfolio={portfolio.updatePortfolio} theme={theme} onToggleTheme={toggleTheme} onLogout={() => {
-      sessionStorage.removeItem("folio-admin-authenticated");
+    ? <Admin data={portfolio.data} updatePortfolio={portfolio.updatePortfolio} initialized={portfolio.initialized} legacyData={portfolio.legacyData} legacyLoading={portfolio.legacyLoading} legacyError={portfolio.legacyError} onInitializePortfolio={portfolio.initializeSharedData} theme={theme} onToggleTheme={toggleTheme} onLogout={async () => {
+      const { error } = await getSupabaseClient().auth.signOut();
+      if (error) throw new Error(`Could not sign out: ${error.message}`);
       setIsAuthenticated(false);
       window.history.replaceState(null, "", homeUrl);
     }} />
@@ -108,20 +189,26 @@ function ThemeToggle({ theme, onToggle }: { theme: "light" | "dark"; onToggle: (
   return <button className="theme-toggle" onClick={onToggle} type="button" aria-label={`Switch to ${nextTheme} mode`} title={`Switch to ${nextTheme} mode`}><Icon name={theme === "dark" ? "sun" : "moon"} size={16} /><span>{theme === "dark" ? "Light" : "Dark"}</span></button>;
 }
 
-function AdminLogin({ theme, onToggleTheme, onAuthenticated }: { theme: "light" | "dark"; onToggleTheme: () => void; onAuthenticated: () => void }) {
+function AdminLogin({ theme, onToggleTheme, authMessage, onLogin }: { theme: "light" | "dark"; onToggleTheme: () => void; authMessage: string; onLogin: (email: string, password: string) => Promise<void> }) {
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
-  const submit = (event: FormEvent) => {
+  const [busy, setBusy] = useState(false);
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (password !== "admin27") {
-      setError("That password doesn’t look right. Please try again.");
+    setBusy(true);
+    setError("");
+    try {
+      await onLogin(email.trim(), password);
+    } catch (loginError) {
+      setError(loginError instanceof Error ? loginError.message : "Could not sign in. Please try again.");
       setPassword("");
-      return;
+    } finally {
+      setBusy(false);
     }
-    onAuthenticated();
   };
   const homeUrl = import.meta.env.BASE_URL;
-  return <main className="login-shell"><div className="login-top"><a className="admin-brand" href={homeUrl}><span className="admin-brand-mark">{"</>"}</span><span>folio<span className="brand-muted">.dev</span><small>DEVELOPER PORTFOLIO</small></span></a><ThemeToggle theme={theme} onToggle={onToggleTheme} /></div><form className="login-card" onSubmit={submit}><span className="eyebrow">ADMIN / AUTHENTICATION</span><h1>Welcome back.</h1><p>Authenticate to manage your portfolio.</p><label className="field"><span>Password</span><input type="password" autoComplete="current-password" autoFocus value={password} onChange={(event) => { setPassword(event.target.value); setError(""); }} placeholder="Enter password" required /></label>{error && <p className="login-error" role="alert">{error}</p>}<button className="button button-dark login-submit" type="submit">Sign in <Icon name="arrow" size={16} /></button><a className="login-home" href={homeUrl}><Icon name="back" size={15} />Back to portfolio</a></form><span className="login-footnote">FOLIO.DEV · ADMIN ACCESS</span></main>;
+  return <main className="login-shell"><div className="login-top"><a className="admin-brand" href={homeUrl}><span className="admin-brand-mark">{"</>"}</span><span>folio<span className="brand-muted">.dev</span><small>DEVELOPER PORTFOLIO</small></span></a><ThemeToggle theme={theme} onToggle={onToggleTheme} /></div><form className="login-card" onSubmit={submit}><span className="eyebrow">ADMIN / AUTHENTICATION</span><h1>Welcome back.</h1><p>Sign in with the admin account configured for this portfolio.</p><label className="field"><span>Email address</span><input type="email" autoComplete="username" autoFocus value={email} onChange={(event) => { setEmail(event.target.value); setError(""); }} placeholder="you@example.com" required /></label><label className="field"><span>Password</span><input type="password" autoComplete="current-password" value={password} onChange={(event) => { setPassword(event.target.value); setError(""); }} placeholder="Enter password" required /></label>{(error || authMessage) && <p className="login-error" role="alert">{error || authMessage}</p>}<button className="button button-dark login-submit" type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"} {!busy && <Icon name="arrow" size={16} />}</button><a className="login-home" href={homeUrl}><Icon name="back" size={15} />Back to portfolio</a></form><span className="login-footnote">FOLIO.DEV · ADMIN ACCESS</span></main>;
 }
 
 function Portfolio({ data, theme, onToggleTheme }: { data: PortfolioData; theme: "light" | "dark"; onToggleTheme: () => void }) {
@@ -195,7 +282,38 @@ function ProjectModal({ project, onClose }: { project: Project; onClose: () => v
   </>;
 }
 
-function Admin({ data, updatePortfolio, theme, onToggleTheme, onLogout }: { data: PortfolioData; updatePortfolio: (data: PortfolioData) => Promise<void>; theme: "light" | "dark"; onToggleTheme: () => void; onLogout: () => void }) {
+function CloudSetup({ data, legacyData, legacyLoading, legacyError, onInitialize }: { data: PortfolioData; legacyData: PortfolioData | null; legacyLoading: boolean; legacyError: string; onInitialize: (data: PortfolioData) => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const initialize = async (portfolio: PortfolioData) => {
+    setBusy(true);
+    setError("");
+    try {
+      await onInitialize(portfolio);
+    } catch (initializeError) {
+      setError(initializeError instanceof Error ? initializeError.message : "The shared portfolio could not be initialized.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const importLegacy = () => {
+    if (legacyData && window.confirm("Import the portfolio and photos saved in this browser? This will publish them to the shared site.")) {
+      void initialize(legacyData);
+    }
+  };
+  return <section className="cloud-setup editor-page">
+    <span className="eyebrow">// FIRST-TIME SETUP</span>
+    <h1>Set up your shared portfolio.</h1>
+    <p>This Supabase portfolio has no saved content yet. Choose what to publish; after setup, changes will be shared with visitors on every device.</p>
+    {legacyLoading && <p className="cloud-setup-status">Checking this browser for saved portfolio content…</p>}
+    {!legacyLoading && legacyData && <div className="cloud-import-option"><b>Saved work found on this device</b><span>Your previous profile, projects, and uploaded photos can be imported once.</span><button className="button button-dark" type="button" disabled={busy} onClick={importLegacy}>{busy ? "Importing…" : "Import saved work"}</button></div>}
+    {!legacyLoading && legacyError && <p className="error-message cloud-setup-error" role="alert">{legacyError}</p>}
+    {error && <p className="error-message cloud-setup-error" role="alert">{error}</p>}
+    <div className="cloud-setup-actions"><button className="button button-light" type="button" disabled={busy || legacyLoading} onClick={() => void initialize(data)}>{busy ? "Setting up…" : "Start with example content"}</button></div>
+  </section>;
+}
+
+function Admin({ data, updatePortfolio, initialized, legacyData, legacyLoading, legacyError, onInitializePortfolio, theme, onToggleTheme, onLogout }: { data: PortfolioData; updatePortfolio: (data: PortfolioData) => Promise<void>; initialized: boolean; legacyData: PortfolioData | null; legacyLoading: boolean; legacyError: string; onInitializePortfolio: (data: PortfolioData) => Promise<void>; theme: "light" | "dark"; onToggleTheme: () => void; onLogout: () => Promise<void> }) {
   const homeUrl = import.meta.env.BASE_URL;
   const [activeTab, setActiveTab] = useState<"profile" | "projects">("profile");
   const [editingProject, setEditingProject] = useState<Project | null>(null);
@@ -204,6 +322,7 @@ function Admin({ data, updatePortfolio, theme, onToggleTheme, onLogout }: { data
   const [saving, setSaving] = useState(false);
   const [profileDraft, setProfileDraft] = useState<Profile>(data.profile);
   const sortedProjects = data.projects;
+  useEffect(() => setProfileDraft(data.profile), [data.profile]);
   const saveData = async (next: PortfolioData): Promise<boolean> => {
     setSaving(true);
     setSaveError("");
@@ -232,9 +351,9 @@ function Admin({ data, updatePortfolio, theme, onToggleTheme, onLogout }: { data
   };
   return <main className="admin-shell">
     <aside className="admin-sidebar"><a className="admin-brand" href={homeUrl}><span className="admin-brand-mark">{"</>"}</span><span>folio<span className="brand-muted">.dev</span><small>DEVELOPER PORTFOLIO</small></span></a><div className="sidebar-label">CONTENT</div><button className={`sidebar-link ${activeTab === "profile" ? "active" : ""}`} onClick={() => { setActiveTab("profile"); setEditingProject(null); }}><span className="sidebar-icon">◉</span>Profile</button><button className={`sidebar-link ${activeTab === "projects" ? "active" : ""}`} onClick={() => { setActiveTab("projects"); setEditingProject(null); }}><span className="sidebar-icon">▧</span>Projects<span className="sidebar-count">{data.projects.length}</span></button><div className="sidebar-bottom"><a className="view-site-link" href={homeUrl}><span>↗</span> View live site</a><span className="admin-version">FOLIO.DEV · 01</span></div></aside>
-    <div className="admin-main"><header className="admin-topbar"><div className="breadcrumb"><span>Content</span><span>/</span><b>{editingProject ? "Project" : activeTab === "profile" ? "Profile" : "Projects"}</b></div><div className="admin-top-actions"><span className="autosave-label"><span className={`autosave-dot ${saving ? "is-saving" : saved ? "is-saved" : ""}`} />{saving ? "Saving…" : saved ? "All changes saved" : "Saved to this browser"}</span><a className="top-view-button" href={homeUrl} target="_blank" rel="noreferrer">Preview site <Icon name="external" size={14} /></a><ThemeToggle theme={theme} onToggle={onToggleTheme} /><button className="logout-button" onClick={onLogout} type="button">Sign out</button></div></header>
+    <div className="admin-main"><header className="admin-topbar"><div className="breadcrumb"><span>Content</span><span>/</span><b>{!initialized ? "Shared setup" : editingProject ? "Project" : activeTab === "profile" ? "Profile" : "Projects"}</b></div><div className="admin-top-actions"><span className="autosave-label"><span className={`autosave-dot ${saving ? "is-saving" : saved ? "is-saved" : ""}`} />{saving ? "Saving…" : saved ? "All changes saved" : "Shared portfolio"}</span><a className="top-view-button" href={homeUrl} target="_blank" rel="noreferrer">Preview site <Icon name="external" size={14} /></a><ThemeToggle theme={theme} onToggle={onToggleTheme} /><button className="logout-button" onClick={async () => { try { await onLogout(); } catch (error) { setSaveError(error instanceof Error ? error.message : "Could not sign out."); } }} type="button">Sign out</button></div></header>
       <div className="admin-content">
-        {editingProject ? <ProjectEditor project={editingProject} isNew={!data.projects.some((item) => item.id === editingProject.id)} onSave={saveProject} onCancel={() => setEditingProject(null)} /> : activeTab === "profile" ? <section className="editor-page"><div className="editor-heading"><div><span className="eyebrow">// PROFILE</span><h1>Profile details</h1><p>Update the information shown on your public portfolio.</p></div></div><form className="profile-form" onSubmit={saveProfile}><div className="form-section-label"><span>01</span><div><b>Basic information</b><p>Your name, role, and headline.</p></div></div><div className="field-grid"><Field label="Your name" value={profileDraft.name} onChange={(value) => setProfileDraft({ ...profileDraft, name: value })} placeholder="e.g. Alex Morgan" /><Field label="What you do" value={profileDraft.role} onChange={(value) => setProfileDraft({ ...profileDraft, role: value })} placeholder="e.g. Software developer" /><div className="field full-field"><label htmlFor="intro">Your headline</label><textarea id="intro" rows={3} maxLength={180} value={profileDraft.intro} onChange={(event) => setProfileDraft({ ...profileDraft, intro: event.target.value })} placeholder="I build reliable software for the web." /><div className="field-hint">This is the first thing visitors see. Keep it clear. <span>{profileDraft.intro.length}/180</span></div></div><div className="field full-field"><label htmlFor="about">About</label><textarea id="about" rows={4} value={profileDraft.about} onChange={(event) => setProfileDraft({ ...profileDraft, about: event.target.value })} placeholder="Your experience, interests, and approach to development." /></div></div><div className="form-divider" /><div className="form-section-label"><span>02</span><div><b>Contact</b><p>Make it easy for people to get in touch.</p></div></div><div className="field-grid"><Field label="Email address" value={profileDraft.email} onChange={(value) => setProfileDraft({ ...profileDraft, email: value })} placeholder="you@example.com" type="email" /><Field label="Based in" value={profileDraft.location} onChange={(value) => setProfileDraft({ ...profileDraft, location: value })} placeholder="e.g. Brooklyn, NY" /><Field label="Availability note" value={profileDraft.availability} onChange={(value) => setProfileDraft({ ...profileDraft, availability: value })} placeholder="Open to software opportunities" />        <TagField label="Skills & specialties" value={profileDraft.skills} onChange={(skills) => setProfileDraft({ ...profileDraft, skills })} placeholder="JavaScript, React, TypeScript" hint="Separate each skill with a space or comma." /></div><div className="form-divider" /><div className="form-section-label"><span>03</span><div><b>Links</b><p>Profiles and links you want to share.</p></div></div><div className="field-grid"><Field label="GitHub URL" value={profileDraft.github} onChange={(value) => setProfileDraft({ ...profileDraft, github: value })} placeholder="https://github.com/you" type="url" /><Field label="LinkedIn URL" value={profileDraft.linkedin} onChange={(value) => setProfileDraft({ ...profileDraft, linkedin: value })} placeholder="https://linkedin.com/in/you" type="url" /><Field label="Resume URL" value={profileDraft.resume} onChange={(value) => setProfileDraft({ ...profileDraft, resume: value })} placeholder="https://…" type="url" /></div><div className="form-actions"><span className="form-saved"><Icon name="check" size={15} />Saved in this browser.</span><button className="button button-dark save-button" disabled={saving} type="submit">{saving ? "Saving…" : saved ? "Changes saved" : "Save changes"} {!saving && <Icon name={saved ? "check" : "arrow"} size={16} />}</button></div>{saveError && <p className="error-message" role="alert">{saveError}</p>}</form></section> : <section className="editor-page projects-admin-page"><div className="editor-heading"><div><span className="eyebrow">// PROJECTS</span><h1>Projects <span className="admin-project-count">{String(data.projects.length).padStart(2, "0")}</span></h1><p>Manage the projects on your portfolio.</p></div><button className="button button-dark" onClick={() => setEditingProject(emptyProject())}><Icon name="plus" size={17} />Add a project</button></div><div className="admin-project-list">{sortedProjects.map((project) => <article className="admin-project-row" key={project.id}><div className="admin-project-thumb">{project.images[0] ? <img src={imageUrl(project.images[0])} alt="" /> : <Icon name="spark" size={22} />}</div><div className="admin-project-details"><b>{project.title || "Untitled project"}</b><span>{project.category || "No category"} · {project.year}</span><small>{project.images.length} {project.images.length === 1 ? "image" : "images"}</small></div><button className="icon-button" onClick={() => setEditingProject(project)} aria-label={`Edit ${project.title}`}><Icon name="edit" size={17} /></button><button className="icon-button delete-button" onClick={() => deleteProject(project)} aria-label={`Delete ${project.title}`}><Icon name="trash" size={17} /></button></article>)}{data.projects.length === 0 && <div className="empty-admin"><span className="empty-spark">✳</span><h3>No projects yet.</h3><p>Add a project to get started.</p><button className="button button-dark" onClick={() => setEditingProject(emptyProject())}><Icon name="plus" size={17} />Add your first project</button></div>}</div>{saveError && <p className="error-message" role="alert">{saveError}</p>}</section>}
+        {!initialized ? <CloudSetup data={data} legacyData={legacyData} legacyLoading={legacyLoading} legacyError={legacyError} onInitialize={onInitializePortfolio} /> : editingProject ? <ProjectEditor project={editingProject} isNew={!data.projects.some((item) => item.id === editingProject.id)} onSave={saveProject} onCancel={() => setEditingProject(null)} /> : activeTab === "profile" ? <section className="editor-page"><div className="editor-heading"><div><span className="eyebrow">// PROFILE</span><h1>Profile details</h1><p>Update the information shown on your public portfolio.</p></div></div><form className="profile-form" onSubmit={saveProfile}><div className="form-section-label"><span>01</span><div><b>Basic information</b><p>Your name, role, and headline.</p></div></div><div className="field-grid"><Field label="Your name" value={profileDraft.name} onChange={(value) => setProfileDraft({ ...profileDraft, name: value })} placeholder="e.g. Alex Morgan" /><Field label="What you do" value={profileDraft.role} onChange={(value) => setProfileDraft({ ...profileDraft, role: value })} placeholder="e.g. Software developer" /><div className="field full-field"><label htmlFor="intro">Your headline</label><textarea id="intro" rows={3} maxLength={180} value={profileDraft.intro} onChange={(event) => setProfileDraft({ ...profileDraft, intro: event.target.value })} placeholder="I build reliable software for the web." /><div className="field-hint">This is the first thing visitors see. Keep it clear. <span>{profileDraft.intro.length}/180</span></div></div><div className="field full-field"><label htmlFor="about">About</label><textarea id="about" rows={4} value={profileDraft.about} onChange={(event) => setProfileDraft({ ...profileDraft, about: event.target.value })} placeholder="Your experience, interests, and approach to development." /></div></div><div className="form-divider" /><div className="form-section-label"><span>02</span><div><b>Contact</b><p>Make it easy for people to get in touch.</p></div></div><div className="field-grid"><Field label="Email address" value={profileDraft.email} onChange={(value) => setProfileDraft({ ...profileDraft, email: value })} placeholder="you@example.com" type="email" /><Field label="Based in" value={profileDraft.location} onChange={(value) => setProfileDraft({ ...profileDraft, location: value })} placeholder="e.g. Brooklyn, NY" /><Field label="Availability note" value={profileDraft.availability} onChange={(value) => setProfileDraft({ ...profileDraft, availability: value })} placeholder="Open to software opportunities" />        <TagField label="Skills & specialties" value={profileDraft.skills} onChange={(skills) => setProfileDraft({ ...profileDraft, skills })} placeholder="JavaScript, React, TypeScript" hint="Separate each skill with a space or comma." /></div><div className="form-divider" /><div className="form-section-label"><span>03</span><div><b>Links</b><p>Profiles and links you want to share.</p></div></div><div className="field-grid"><Field label="GitHub URL" value={profileDraft.github} onChange={(value) => setProfileDraft({ ...profileDraft, github: value })} placeholder="https://github.com/you" type="url" /><Field label="LinkedIn URL" value={profileDraft.linkedin} onChange={(value) => setProfileDraft({ ...profileDraft, linkedin: value })} placeholder="https://linkedin.com/in/you" type="url" /><Field label="Resume URL" value={profileDraft.resume} onChange={(value) => setProfileDraft({ ...profileDraft, resume: value })} placeholder="https://…" type="url" /></div><div className="form-actions"><span className="form-saved"><Icon name="check" size={15} />Saved to shared portfolio.</span><button className="button button-dark save-button" disabled={saving} type="submit">{saving ? "Saving…" : saved ? "Changes saved" : "Save changes"} {!saving && <Icon name={saved ? "check" : "arrow"} size={16} />}</button></div>{saveError && <p className="error-message" role="alert">{saveError}</p>}</form></section> : <section className="editor-page projects-admin-page"><div className="editor-heading"><div><span className="eyebrow">// PROJECTS</span><h1>Projects <span className="admin-project-count">{String(data.projects.length).padStart(2, "0")}</span></h1><p>Manage the projects on your portfolio.</p></div><button className="button button-dark" onClick={() => setEditingProject(emptyProject())}><Icon name="plus" size={17} />Add a project</button></div><div className="admin-project-list">{sortedProjects.map((project) => <article className="admin-project-row" key={project.id}><div className="admin-project-thumb">{project.images[0] ? <img src={imageUrl(project.images[0])} alt="" /> : <Icon name="spark" size={22} />}</div><div className="admin-project-details"><b>{project.title || "Untitled project"}</b><span>{project.category || "No category"} · {project.year}</span><small>{project.images.length} {project.images.length === 1 ? "image" : "images"}</small></div><button className="icon-button" onClick={() => setEditingProject(project)} aria-label={`Edit ${project.title}`}><Icon name="edit" size={17} /></button><button className="icon-button delete-button" onClick={() => deleteProject(project)} aria-label={`Delete ${project.title}`}><Icon name="trash" size={17} /></button></article>)}{data.projects.length === 0 && <div className="empty-admin"><span className="empty-spark">✳</span><h3>No projects yet.</h3><p>Add a project to get started.</p><button className="button button-dark" onClick={() => setEditingProject(emptyProject())}><Icon name="plus" size={17} />Add your first project</button></div>}</div>{saveError && <p className="error-message" role="alert">{saveError}</p>}</section>}
       </div>
     </div>
   </main>;
@@ -311,7 +430,7 @@ function ProjectEditor({ project, isNew, onSave, onCancel }: { project: Project;
         <div className="form-section-label"><span>02</span><div><b>Screenshots</b><p>Add multiple images to show the UI, architecture, or results.</p></div></div>
         <div className="image-upload-area">
           <div className="uploaded-images">{draft.images.map((image) => <div className="uploaded-image" key={image.id}><img src={imageUrl(image)} alt={image.alt || "Project preview"} /><button type="button" onClick={() => update({ images: draft.images.filter((item) => item.id !== image.id) })} aria-label="Remove image"><Icon name="close" size={16} /></button><input aria-label="Describe this image" value={image.alt} placeholder="Describe this image" onChange={(event) => update({ images: draft.images.map((item) => item.id === image.id ? { ...item, alt: event.target.value } : item) })} /></div>)}</div>
-          <label className="upload-dropzone"><input type="file" accept="image/*" multiple onChange={handleFiles} /><span className="upload-icon"><Icon name="upload" size={20} /></span><b>Upload screenshots</b><span>JPG, PNG, GIF, or WebP · Select multiple files</span><span className="upload-limit">No image count limit · Stored in this browser</span></label>
+          <label className="upload-dropzone"><input type="file" accept="image/jpeg,image/png,image/gif,image/webp,image/avif,image/svg+xml" multiple onChange={handleFiles} /><span className="upload-icon"><Icon name="upload" size={20} /></span><b>Upload screenshots</b><span>JPG, PNG, GIF, WebP, AVIF, or SVG · Up to 10 MB each</span><span className="upload-limit">Photos are uploaded to shared storage when you save</span></label>
         </div>
         <div className="form-divider" />
         <div className="form-section-label"><span>03</span><div><b>Project links</b><p>Optionally link to a live demo and the source repository.</p></div></div>
@@ -319,7 +438,7 @@ function ProjectEditor({ project, isNew, onSave, onCancel }: { project: Project;
           <Field label="Live demo URL" value={draft.liveUrl} onChange={(value) => update({ liveUrl: value })} placeholder="https://…" type="url" />
           <Field label="Source repository URL" value={draft.sourceUrl} onChange={(value) => update({ sourceUrl: value })} placeholder="https://github.com/…" type="url" />
         </div>
-        <div className="form-actions"><span className="form-saved"><Icon name="check" size={15} />Saved in this browser.</span><button type="button" className="button button-light" onClick={onCancel}>Cancel</button><button type="submit" className="button button-dark save-button" disabled={busy}>{busy ? "Saving…" : isNew ? "Add project" : "Save project"} <Icon name="arrow" size={16} /></button></div>
+        <div className="form-actions"><span className="form-saved"><Icon name="check" size={15} />Changes sync when saved.</span><button type="button" className="button button-light" onClick={onCancel}>Cancel</button><button type="submit" className="button button-dark save-button" disabled={busy}>{busy ? "Saving…" : isNew ? "Add project" : "Save project"} <Icon name="arrow" size={16} /></button></div>
         {error && <p className="error-message" role="alert">{error}</p>}
       </form>
     </section>

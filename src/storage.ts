@@ -1,8 +1,16 @@
-import type { PortfolioData, Project } from "./types";
+import { getSupabaseClient } from "./supabase";
+import type { PortfolioData, Project, ProjectImage } from "./types";
 
 const DATABASE_NAME = "folio-studio";
 const DATABASE_VERSION = 1;
 const RECORD_KEY = "portfolio";
+const PORTFOLIO_ID = "main";
+const IMAGE_BUCKET = "portfolio-images";
+
+export interface PortfolioSnapshot {
+  data: PortfolioData;
+  initialized: boolean;
+}
 
 export const starterData: PortfolioData = {
   profile: {
@@ -82,46 +90,163 @@ export const starterData: PortfolioData = {
   ],
 };
 
-function openDatabase(): Promise<IDBDatabase> {
+function openLegacyDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DATABASE_NAME, DATABASE_VERSION);
     request.onupgradeneeded = () => {
       request.result.createObjectStore("data");
     };
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("Could not open portfolio storage."));
+    request.onerror = () => reject(request.error ?? new Error("Could not open saved browser data."));
   });
 }
 
-export async function loadPortfolio(): Promise<PortfolioData> {
-  const database = await openDatabase();
+export async function loadLegacyPortfolio(): Promise<PortfolioData | null> {
+  const database = await openLegacyDatabase();
   try {
-    const stored = await new Promise<PortfolioData | undefined>((resolve, reject) => {
+    return await new Promise<PortfolioData | null>((resolve, reject) => {
       const request = database.transaction("data", "readonly").objectStore("data").get(RECORD_KEY);
-      request.onsuccess = () => resolve(request.result as PortfolioData | undefined);
-      request.onerror = () => reject(request.error ?? new Error("Could not load portfolio data."));
+      request.onsuccess = () => resolve(request.result ?? null);
+      request.onerror = () => reject(request.error ?? new Error("Could not read saved browser data."));
     });
-    return stored ?? structuredClone(starterData);
   } finally {
     database.close();
   }
 }
 
-export async function savePortfolio(data: PortfolioData): Promise<void> {
-  const database = await openDatabase();
+export async function loadPortfolio(): Promise<PortfolioSnapshot> {
+  const { data, error } = await getSupabaseClient()
+    .from("portfolio_content")
+    .select("content")
+    .eq("id", PORTFOLIO_ID)
+    .maybeSingle();
+  if (error) throw new Error(`Portfolio data could not be loaded: ${error.message}`);
+  if (!data) return { data: structuredClone(starterData), initialized: false };
+  return { data: data.content as PortfolioData, initialized: true };
+}
+
+function safePathSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+function fileExtension(blob: Blob): string {
+  const extensionByType: Record<string, string> = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/avif": "avif",
+    "image/svg+xml": "svg",
+  };
+  return extensionByType[blob.type] ?? "img";
+}
+
+async function uploadBlobImages(data: PortfolioData): Promise<{ data: PortfolioData; uploadedPaths: string[] }> {
+  const client = getSupabaseClient();
+  const uploadedPaths: string[] = [];
   try {
-    await new Promise<void>((resolve, reject) => {
-      const transaction = database.transaction("data", "readwrite");
-      transaction.objectStore("data").put(data, RECORD_KEY);
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () =>
-        reject(transaction.error ?? new Error("Could not save portfolio changes."));
-      transaction.onabort = () =>
-        reject(transaction.error ?? new Error("Portfolio changes could not be saved."));
-    });
-  } finally {
-    database.close();
+    const projects: Project[] = [];
+    for (const project of data.projects) {
+      const images: ProjectImage[] = [];
+      for (const image of project.images) {
+        if (typeof image.src === "string") {
+          images.push(image);
+          continue;
+        }
+        const path = `projects/${safePathSegment(project.id)}/${safePathSegment(image.id)}-${crypto.randomUUID()}.${fileExtension(image.src)}`;
+        const { error } = await client.storage.from(IMAGE_BUCKET).upload(path, image.src, {
+          contentType: image.src.type || "application/octet-stream",
+          upsert: false,
+        });
+        if (error) throw new Error(`Could not upload “${image.alt || project.title}”: ${error.message}`);
+        uploadedPaths.push(path);
+        const { data: publicUrl } = client.storage.from(IMAGE_BUCKET).getPublicUrl(path);
+        images.push({ ...image, src: publicUrl.publicUrl });
+      }
+      projects.push({ ...project, images });
+    }
+    return { data: { ...data, projects }, uploadedPaths };
+  } catch (error) {
+    const cleanupError = await removeStoragePaths(uploadedPaths);
+    const message = error instanceof Error ? error.message : "Project images could not be uploaded.";
+    throw new Error(cleanupError ? `${message} Some uploaded files could not be cleaned up: ${cleanupError}` : message);
   }
+}
+
+function storagePathFromPublicUrl(src: string): string | null {
+  const marker = `/storage/v1/object/public/${IMAGE_BUCKET}/`;
+  const markerIndex = src.indexOf(marker);
+  return markerIndex < 0 ? null : src.slice(markerIndex + marker.length);
+}
+
+async function removeStoragePaths(paths: string[]): Promise<string | null> {
+  if (!paths.length) return null;
+  const { error } = await getSupabaseClient().storage.from(IMAGE_BUCKET).remove(paths);
+  return error?.message ?? null;
+}
+
+function managedImagePaths(data: PortfolioData | null): Set<string> {
+  const paths = new Set<string>();
+  for (const project of data?.projects ?? []) {
+    for (const image of project.images) {
+      if (typeof image.src !== "string") continue;
+      const path = storagePathFromPublicUrl(image.src);
+      if (path) paths.add(path);
+    }
+  }
+  return paths;
+}
+
+async function getStoredPortfolio(): Promise<PortfolioData | null> {
+  const { data, error } = await getSupabaseClient()
+    .from("portfolio_content")
+    .select("content")
+    .eq("id", PORTFOLIO_ID)
+    .maybeSingle();
+  if (error) throw new Error(`Existing portfolio data could not be checked: ${error.message}`);
+  return data ? data.content as PortfolioData : null;
+}
+
+export async function initializePortfolio(data: PortfolioData): Promise<PortfolioData> {
+  const client = getSupabaseClient();
+  if (await getStoredPortfolio()) {
+    throw new Error("A shared portfolio already exists. Reload the page to get the latest version.");
+  }
+  const uploaded = await uploadBlobImages(data);
+  const { error } = await client.from("portfolio_content").insert({
+    id: PORTFOLIO_ID,
+    content: uploaded.data,
+  });
+  if (error) {
+    const cleanupError = await removeStoragePaths(uploaded.uploadedPaths);
+    const message = `The shared portfolio could not be initialized: ${error.message}`;
+    throw new Error(cleanupError ? `${message} Some uploaded files could not be cleaned up: ${cleanupError}` : message);
+  }
+  return uploaded.data;
+}
+
+export async function savePortfolio(data: PortfolioData): Promise<PortfolioData> {
+  const client = getSupabaseClient();
+  const previousData = await getStoredPortfolio();
+  const uploaded = await uploadBlobImages(data);
+  const { error } = await client.from("portfolio_content").upsert({
+    id: PORTFOLIO_ID,
+    content: uploaded.data,
+    updated_at: new Date().toISOString(),
+  });
+  if (error) {
+    const cleanupError = await removeStoragePaths(uploaded.uploadedPaths);
+    const message = `Portfolio changes could not be saved: ${error.message}`;
+    throw new Error(cleanupError ? `${message} Some uploaded files could not be cleaned up: ${cleanupError}` : message);
+  }
+
+  const nextPaths = managedImagePaths(uploaded.data);
+  const removedPaths = [...managedImagePaths(previousData)].filter((path) => !nextPaths.has(path));
+  const cleanupError = await removeStoragePaths(removedPaths);
+  if (cleanupError) {
+    throw new Error(`Portfolio changes were saved, but removed photos could not be cleaned up: ${cleanupError}`);
+  }
+  return uploaded.data;
 }
 
 export function emptyProject(): Project {

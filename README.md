@@ -9,15 +9,35 @@ npm install
 npm run dev
 ```
 
-Visit the local address printed by Vite for the portfolio, then open `/admin` and enter the admin password to edit the introduction or add, update, and remove projects. Project galleries accept multiple image uploads; image data and portfolio edits are saved in IndexedDB in the current browser. The color theme follows the browser preference on first visit; the header toggle switches themes and remembers your choice.
+Create a Supabase project and configure it as described in [Shared portfolio setup](#shared-portfolio-setup) before starting the app. Visit the local address printed by Vite for the portfolio, then open `/admin` and sign in with the configured admin account. Profile and project edits are stored in Supabase and are shared across devices; uploaded project photos are saved in Supabase Storage. The color theme follows the browser preference on first visit; the header toggle switches themes and remembers your choice.
 
 ## Publishing and storage
 
-This starter is a browser-only app: admin edits are local to the browser and are not automatically shared with visitors or other devices. The developer-focused profile and example projects are starter content for a browser without a saved portfolio; replace them with your real details before publishing. Previously saved portfolios are preserved and are not overwritten when the starter examples change. The admin password prompt is only a client-side convenience; it is not secure authentication because the app and password check are delivered to the browser. For a live, multi-user portfolio, connect the editor to a hosted database and media store, protect the admin route with server-side authentication, and deploy the app with a server-side API.
+The portfolio data in Supabase is the shared source of truth. The public site loads it on page load, so edits appear on every device without rebuilding or redeploying the frontend. The starter profile and projects are examples; choose whether to import existing browser data or initialize the shared portfolio with the examples the first time you sign in. Browser-local legacy data is not deleted after import.
+
+## Shared portfolio setup
+
+1. Create a Supabase project.
+2. In the Supabase SQL Editor, open [`supabase/setup.sql`](./supabase/setup.sql), replace every `REPLACE_WITH_ADMIN_EMAIL` with the email address you will use to administer the site, then run the script. It creates the shared portfolio table, row-level security policies, and a public-read photo bucket with admin-only upload and delete policies.
+3. In **Authentication → Providers**, enable Email/password authentication and disable new user sign-ups. Create or invite your own admin user from the Supabase dashboard, using the same email entered in the SQL script. Do not make the site public signup-enabled.
+4. Copy your Supabase project URL and its publishable/anon key from the project API settings. Never put the service-role key in this frontend.
+5. For local development, create an untracked `.env.local` file in the repository root with:
+
+   ```env
+   VITE_SUPABASE_URL=https://your-project.supabase.co
+   VITE_SUPABASE_ANON_KEY=your-publishable-or-anon-key
+   VITE_ADMIN_EMAIL=you@example.com
+   ```
+
+6. For GitHub Pages, add `VITE_SUPABASE_URL` and `VITE_ADMIN_EMAIL` under **Repository Settings → Secrets and variables → Actions → Variables**, and add `VITE_SUPABASE_ANON_KEY` under **Secrets**. The deploy workflow checks these are configured before building.
+7. Add `https://joekesserwani.github.io` and `http://localhost:5173` to the Supabase Auth URL configuration as allowed redirect URLs. Push to `main` or run the deployment workflow after configuring the variables and secret.
+8. Sign in at `https://joekesserwani.github.io/Portfolio/?admin`. If the shared portfolio is empty, choose **Import saved work** to transfer content/photos from the current browser after confirmation, or initialize it with the starter content. Import only works from the browser that contains the old IndexedDB data.
+
+The Supabase anon/publishable key is intended to be visible in a static frontend. Row-level security and Storage policies enforce that only the configured admin email can change portfolio content or upload/delete photos.
 
 ## Deploying to GitHub Pages
 
-This repository includes a GitHub Actions workflow that builds the Vite app with the `/Portfolio/` base path and deploys the generated `dist` folder to GitHub Pages whenever changes are pushed to `main`. In the repository settings, set **Pages → Build and deployment → Source** to **GitHub Actions**. The published app is available at `https://joekesserwani.github.io/Portfolio/`; open its admin page at `https://joekesserwani.github.io/Portfolio/?admin`. The query-string admin URL is used because GitHub Pages does not provide a server-side route fallback for `/admin`.
+This repository includes a GitHub Actions workflow that builds the Vite app with the `/Portfolio/` base path and deploys the generated `dist` folder to GitHub Pages whenever changes are pushed to `main`. In the repository settings, set **Pages → Build and deployment → Source** to **GitHub Actions**. Configure the Supabase workflow variables and secret before deploying. The published app is available at `https://joekesserwani.github.io/Portfolio/`; open its admin page at `https://joekesserwani.github.io/Portfolio/?admin`. The query-string admin URL is used because GitHub Pages does not provide a server-side route fallback for `/admin`.
 
 ## Production build
 
