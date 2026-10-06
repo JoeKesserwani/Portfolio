@@ -184,6 +184,11 @@ button { color: inherit; }
 .field input::placeholder, .field textarea::placeholder { color: color-mix(in srgb,var(--muted) 65%,transparent); }
 .field textarea { min-height: auto; resize: vertical; line-height: 1.6; }
 .field-hint { display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; color: var(--muted); font-size: 8px; }
+.tag-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.tag-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 2px; background: var(--surface-subtle); color: var(--ink); font-size: 9px; }
+.tag-chip button { padding: 0; border: 0; background: transparent; color: var(--muted); font-size: 13px; line-height: 1; cursor: pointer; }
+.tag-chip button:hover { color: var(--danger); }
+.tag-chip button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .form-divider { height: 1px; margin: 23px 0 0 27px; background: var(--line); }
 .form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 24px 0 0 27px; }
 .form-saved { display: flex; align-items: center; gap: 5px; margin-right: auto; color: var(--muted); font: 8px var(--mono); }
