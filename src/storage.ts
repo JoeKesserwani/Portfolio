@@ -14,13 +14,13 @@ export interface PortfolioSnapshot {
 
 export const starterData: PortfolioData = {
   profile: {
-    name: "Alex Morgan",
+    name: "",
     role: "Software developer",
     intro: "I build reliable software for the web.",
     about:
       "I’m a software developer focused on building useful, reliable web applications. I enjoy solving practical problems, working across the stack, and turning ideas into software people can depend on.",
     location: "Brooklyn, NY",
-    email: "hello@alexmorgan.dev",
+    email: "hello@.dev",
     availability: "Open to software opportunities",
     skills: [
       "TypeScript",
