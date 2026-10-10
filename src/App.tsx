@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
 import { emptyProject, initializePortfolio as initializeSharedPortfolio, loadLegacyPortfolio, loadPortfolio, savePortfolio } from "./storage";
 import { getSupabaseClient, isAdminEmail, isSupabaseConfigured } from "./supabase";
 import type { PortfolioData, Profile, Project, ProjectImage } from "./types";
@@ -262,23 +262,88 @@ function ProjectCard({ project, index, onOpen }: { project: Project; index: numb
 }
 
 function ProjectModal({ project, onClose }: { project: Project; onClose: () => void }) {
-  const [selectedImage, setSelectedImage] = useState<ProjectImage | null>(null);
+  const [selectedImageIndex, setSelectedImageIndex] = useState<number | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+  const imageWrapRef = useRef<HTMLDivElement>(null);
+  const selectedImage = selectedImageIndex === null ? null : project.images[selectedImageIndex];
+  const fitImageToViewer = () => {
+    const image = imageRef.current;
+    const imageWrap = imageWrapRef.current;
+    if (!image || !imageWrap || !image.naturalWidth || !image.naturalHeight) return;
+    const scale = Math.min(imageWrap.clientWidth / image.naturalWidth, imageWrap.clientHeight / image.naturalHeight, 1);
+    setImageSize({ width: image.naturalWidth * scale, height: image.naturalHeight * scale });
+  };
+  const showImage = (index: number) => {
+    setSelectedImageIndex(index);
+    setZoom(1);
+    setImageSize(null);
+    imageWrapRef.current?.scrollTo(0, 0);
+  };
+  const moveImage = (direction: -1 | 1) => {
+    if (selectedImageIndex === null || project.images.length < 2) return;
+    setSelectedImageIndex((selectedImageIndex + direction + project.images.length) % project.images.length);
+    setZoom(1);
+    setImageSize(null);
+    imageWrapRef.current?.scrollTo(0, 0);
+  };
+  const zoomImage = (clientX?: number, clientY?: number) => {
+    const image = imageRef.current;
+    const imageWrap = imageWrapRef.current;
+    if (!image || !imageWrap || !imageSize) return;
+    const imageRect = image.getBoundingClientRect();
+    const wrapRect = imageWrap.getBoundingClientRect();
+    const nextZoom = zoom === 5 ? 1 : zoom + 1;
+    if (nextZoom === 1) {
+      setZoom(1);
+      imageWrap.scrollTo(0, 0);
+      return;
+    }
+    const pointX = clientX === undefined ? 0.5 : Math.max(0, Math.min(1, (clientX - imageRect.left) / imageRect.width));
+    const pointY = clientY === undefined ? 0.5 : Math.max(0, Math.min(1, (clientY - imageRect.top) / imageRect.height));
+    const offsetX = clientX === undefined ? imageWrap.clientWidth / 2 : clientX - wrapRect.left;
+    const offsetY = clientY === undefined ? imageWrap.clientHeight / 2 : clientY - wrapRect.top;
+    const width = imageSize.width * nextZoom;
+    const height = imageSize.height * nextZoom;
+    const left = Math.max(0, (imageWrap.clientWidth - width) / 2);
+    const top = Math.max(0, (imageWrap.clientHeight - height) / 2);
+    setZoom(nextZoom);
+    requestAnimationFrame(() => {
+      imageWrap.scrollLeft = left + pointX * width - offsetX;
+      imageWrap.scrollTop = top + pointY * height - offsetY;
+    });
+  };
+  useEffect(() => {
+    setImageSize(null);
+    setZoom(1);
+    imageWrapRef.current?.scrollTo(0, 0);
+    const resizeObserver = new ResizeObserver(fitImageToViewer);
+    if (imageWrapRef.current) resizeObserver.observe(imageWrapRef.current);
+    if (imageRef.current?.complete) fitImageToViewer();
+    return () => resizeObserver.disconnect();
+  }, [selectedImageIndex]);
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (selectedImage) setSelectedImage(null);
-      else onClose();
+      if (event.key === "Escape") {
+        if (selectedImage) setSelectedImageIndex(null);
+        else onClose();
+      } else if (selectedImage && event.key === "ArrowLeft") {
+        moveImage(-1);
+      } else if (selectedImage && event.key === "ArrowRight") {
+        moveImage(1);
+      }
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [onClose, selectedImage]);
+  }, [onClose, selectedImage, selectedImageIndex]);
   useEffect(() => {
     document.body.style.overflow = "hidden";
     return () => { document.body.style.overflow = ""; };
   }, []);
   return <>
-    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="project-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button className="modal-close" onClick={onClose} aria-label="Close project"><Icon name="close" /></button><div className="modal-topline"><span>{project.category}</span><span>{project.year}</span></div><h2 id="modal-title">{project.title}</h2><p className="modal-description">{project.description}</p><div className="modal-tags">{project.stack.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="modal-gallery">{project.images.map((image) => <button className="modal-gallery-image" key={image.id} type="button" onClick={() => setSelectedImage(image)} aria-label={`View full image: ${image.alt || project.title}`}><img src={imageUrl(image)} alt={image.alt || project.title} /></button>)}</div><div className="modal-links">{project.liveUrl && <a className="button button-dark" href={project.liveUrl} target="_blank" rel="noreferrer">View live project <Icon name="external" size={16} /></a>}{project.sourceUrl && <a className="button button-light" href={project.sourceUrl} target="_blank" rel="noreferrer"><Icon name="github" size={16} />View source</a>}</div></section></div>
-    {selectedImage && <div className="image-viewer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedImage(null); }}><section className="image-viewer" role="dialog" aria-modal="true" aria-label={`Full image: ${selectedImage.alt || project.title}`}><button className="image-viewer-close" type="button" onClick={() => setSelectedImage(null)} aria-label="Close full image"><Icon name="close" /></button><img src={imageUrl(selectedImage)} alt={selectedImage.alt || project.title} /></section></div>}
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="project-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button className="modal-close" onClick={onClose} aria-label="Close project"><Icon name="close" /></button><div className="modal-topline"><span>{project.category}</span><span>{project.year}</span></div><h2 id="modal-title">{project.title}</h2><p className="modal-description">{project.description}</p><div className="modal-tags">{project.stack.map((tag) => <span key={tag}>{tag}</span>)}</div><div className="modal-gallery">{project.images.map((image, index) => <button className="modal-gallery-image" key={image.id} type="button" onClick={() => showImage(index)} aria-label={`View full image: ${image.alt || project.title}`}><img src={imageUrl(image)} alt={image.alt || project.title} /></button>)}</div><div className="modal-links">{project.liveUrl && <a className="button button-dark" href={project.liveUrl} target="_blank" rel="noreferrer">View live project <Icon name="external" size={16} /></a>}{project.sourceUrl && <a className="button button-light" href={project.sourceUrl} target="_blank" rel="noreferrer"><Icon name="github" size={16} />View source</a>}</div></section></div>
+    {selectedImage && <div className="image-viewer-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelectedImageIndex(null); }}><section className="image-viewer" role="dialog" aria-modal="true" aria-label={`Full image: ${selectedImage.alt || project.title}`}><div className="image-viewer-toolbar"><span className="image-viewer-count">{selectedImageIndex! + 1} / {project.images.length}</span><span className="image-viewer-zoom" aria-live="polite">{zoom}×</span><button className="image-viewer-close" type="button" onClick={() => setSelectedImageIndex(null)} aria-label="Close full image"><Icon name="close" /></button></div><div className="image-viewer-image-wrap" ref={imageWrapRef}><img ref={imageRef} className={`zoom-in${zoom > 1 ? " zoomed" : ""}${zoom === 5 ? " zoom-out" : ""}`} src={imageUrl(selectedImage)} alt={selectedImage.alt || project.title} style={imageSize ? { width: imageSize.width * zoom, height: imageSize.height * zoom } : undefined} onLoad={fitImageToViewer} onClick={(event) => zoomImage(event.clientX, event.clientY)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); zoomImage(); } }} role="button" tabIndex={0} aria-label={`Photo at ${zoom} times zoom. Click to ${zoom === 5 ? "reset zoom" : "zoom in"}.`} /></div>{project.images.length > 1 && <><button className="image-viewer-nav image-viewer-prev" type="button" onClick={() => moveImage(-1)} aria-label="Previous photo">‹</button><button className="image-viewer-nav image-viewer-next" type="button" onClick={() => moveImage(1)} aria-label="Next photo">›</button></>}</section></div>}
   </>;
 }
 
